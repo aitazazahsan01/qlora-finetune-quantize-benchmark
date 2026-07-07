@@ -1,0 +1,27 @@
+# Pure-Python API surfaces: pinned exactly, not >=. These ship breaking API
+# changes often enough that an unbounded minimum version will eventually
+# resolve to something the code here wasn't written against (this bit us
+# once already - trl's SFTTrainer API moved out from under an unpinned
+# install). If you deliberately want to try newer versions, bump these by
+# hand and expect to fix a few call sites.
+transformers==4.44.2
+peft==0.12.0
+accelerate==0.33.0
+datasets==2.20.0
+
+# bitsandbytes is a native CUDA extension, not a pure-Python API surface -
+# like torch (never listed here at all; Colab's preinstalled, CUDA-matched
+# build is used as-is), it has to track whatever CUDA/triton Colab's current
+# base image ships, which drifts over time independent of this file.
+# Pinning it caused exactly this problem once already: 0.43.3 predates
+# Colab's CUDA 12.8 image and its import chain unconditionally pulls in
+# triton.ops, which newer triton dropped. Always take the latest here.
+bitsandbytes>=0.45.0
+
+# Eval / benchmarking
+sentencepiece
+scipy
+
+# Misc
+pyyaml
+tqdm

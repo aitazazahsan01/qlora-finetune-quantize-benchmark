@@ -1,0 +1,85 @@
+# QLoRA fine-tuning config for Qwen2.5-3B-Instruct on a free Colab T4.
+# Every value here is deliberate for the T4's constraints (~15GB VRAM, Turing
+# architecture -> no bf16 tensor cores). See src/train.py for how these are consumed.
+
+model:
+  base_model_id: "Qwen/Qwen2.5-3B-Instruct"
+  # NF4 = "NormalFloat4", a quantization format designed for weights that are
+  # roughly normally distributed (true for trained neural net weights). This is
+  # what makes QLoRA different from plain LoRA: the frozen base model lives in
+  # 4-bit the whole time, only the adapters are full precision.
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true   # quantizes the quantization constants too, saves ~0.4 bits/param extra
+  bnb_4bit_compute_dtype: "float16" # T4 has no bf16 tensor cores -> compute must be fp16, not bf16
+
+lora:
+  r: 16              # rank of the low-rank update matrices (A: d x r, B: r x d). Higher r = more capacity, more VRAM/compute.
+  alpha: 32           # scaling factor; the actual update is scaled by alpha/r. alpha=2*r is a common, stable starting ratio.
+  dropout: 0.05
+  target_modules:      # attach LoRA to every linear projection, not just attention -
+    - q_proj            # the original QLoRA paper found this closes most of the gap to full fine-tuning.
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+data:
+  raw_dataset_id: "yahma/alpaca-cleaned"
+  train_path: "data/alpaca_train.jsonl"
+  val_path: "data/alpaca_val.jsonl"
+  max_seq_len: 1024
+  n_train: 9000
+  n_val: 500
+  seed: 42
+
+training:
+  output_dir: "outputs/adapters/qwen2.5-3b-alpaca-qlora"
+  # 1 epoch, not 2: at the observed ~11s/step on a T4, 2 epochs (1124 steps)
+  # is a 3.5-4hr single sitting - too long for a free-tier Colab session to
+  # comfortably absorb. Loss was already dropping fast within the first 100
+  # steps (1.24 -> ~0.97), so 1 epoch (~562 steps, ~1.7-1.8hrs incl. eval
+  # pauses) is enough to see a real fine-tuning effect for this first
+  # end-to-end pipeline run. Bump back to 2 for a proper quality run once
+  # you've confirmed evaluate/quantize/benchmark all work.
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4   # effective batch size = 4 * 4 = 16
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  logging_steps: 10
+  save_steps: 100
+  save_total_limit: 3
+  eval_steps: 100
+  eval_subset_size: 150  # training-time monitoring eval only - full n_val set is still used by evaluate.py's real quality check later. Each periodic eval was costing ~2.2min over all 500 val examples; 150 is plenty to watch the loss trend without eating a quarter-hour+ total.
+  fp16: true            # matches bnb_4bit_compute_dtype above; T4 can't do bf16
+  optim: "paged_adamw_8bit"  # paged optimizer: offloads optimizer states to CPU RAM on VRAM spikes instead of OOM-ing
+  gradient_checkpointing: true  # trades ~20% more compute time for a big activation-memory saving - needed to fit batch_size=4 @ seq_len=1024 on a 15GB T4
+  seed: 42
+
+eval:
+  n_perplexity_examples: 200   # subset of val set for perplexity - full 500 is unnecessary for a stable estimate and slower on every variant
+  qualitative_prompts:
+    - "Explain the difference between a list and a tuple in Python."
+    - "Write a short poem about the ocean at night."
+    - "What are three tips for staying focused while studying?"
+    - "Summarize the plot of Romeo and Juliet in two sentences."
+    - "How do I convert Celsius to Fahrenheit? Give the formula."
+    - "Give me a recipe idea using chicken, rice, and broccoli."
+    - "What is the difference between weather and climate?"
+    - "Write a polite email asking a coworker to review my document."
+
+quantization:
+  llama_cpp_dir: "third_party/llama.cpp"   # cloned + built by src/quantize.py if missing
+  merged_dir: "outputs/merged/qwen2.5-3b-alpaca-merged"
+  gguf_dir: "outputs/quantized"
+  gguf_levels:      # ordered lightest-quality-loss to heaviest; benchmark.py sweeps all of these
+    - "Q8_0"
+    - "Q5_K_M"
+    - "Q4_K_M"
